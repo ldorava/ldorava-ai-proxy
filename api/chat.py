@@ -166,7 +166,9 @@ def upload_pdf_to_gemini(pdf_bytes, display_name="guide.pdf"):
   with urllib.request.urlopen(req2, timeout=20) as resp2:
     info = json.loads(resp2.read().decode("utf-8"))
 
-  file_obj = info.get("file") if isinstance(info, dict) and "file" in info else info
+  file_obj = (
+      info.get("file") if isinstance(info, dict) and "file" in info else info
+  )
   file_uri = file_obj.get("uri") if isinstance(file_obj, dict) else None
   file_name = file_obj.get("name") if isinstance(file_obj, dict) else None
   state = file_obj.get("state") if isinstance(file_obj, dict) else None
@@ -201,7 +203,9 @@ def load_gemini_pdf_files():
       )
       with urllib.request.urlopen(req, timeout=10) as resp:
         pdf_bytes = resp.read()
-      file_part = upload_pdf_to_gemini(pdf_bytes, display_name=f"guide_{idx}.pdf")
+      file_part = upload_pdf_to_gemini(
+          pdf_bytes, display_name=f"guide_{idx}.pdf"
+      )
       if file_part:
         uploaded.append(file_part)
     except Exception:
@@ -339,11 +343,18 @@ class handler(BaseHTTPRequestHandler):
 
     system_instruction = (
         "أنت مساعد مبيعات واستشارات ودود وسريع لمتجر L'DORA Viva. أجب"
-        " بإيجاز ووضوح بالاعتماد على ملفات PDF المرفقة وبيانات المتجر"
-        " أدناه فقط.\n"
-        "- إذا سأل الزبون عن تعليمات أو نصائح (مثل معرفة نوع البشرة أو"
-        " الخطوات والإرشادات)، استخرج الإجابة مباشرة من ملفات PDF المرفقة"
-        " وقدّمها بوضوح.\n"
+        " بوضوح، ترتيب، وإيجاز بالاعتماد على ملفات PDF المرفقة وبيانات"
+        " المتجر أدناه فقط.\n"
+        "- عند الإجابة عن أسئلة البشرة، العناية، التشخيص (مثل معرفة نوع"
+        " البشرة)، أو التعليمات والإرشادات: استخرج المعلومات من ملفات PDF"
+        " المرفقة ورتّبها في خطوات مرقّمة أو نقاط واضحة ومباشرة (1، 2، 3...)"
+        " ليسهل على الزبون تطبيقها.\n"
+        "- اجعل كل خطوة قصيرة ومفهومة، وإذا كان هناك أنواع أو حالات متعددة"
+        " (مثل البشرة الدهنية، الجافة، المختلطة، الحساسة) فصّل علامات كل"
+        " نوع بوضوح.\n"
+        "- بعد توضيح الخطوات أو الإرشادات، يمكنك ترشيح منتج أو أكثر من"
+        " بيانات المتجر إذا كان مناسباً فعلاً وموجوداً في البيانات، مع ذكر"
+        " سعره بالعملة المحددة (د.ع) بدقة.\n"
         "- اعتمد على بيانات المتجر كمرجع وحيد للأسعار (د.ع) والتوفر"
         " وطريقة الاستخدام (usage) والأنواع (variants) ولا تخترع منتجات أو"
         " أسعار غير موجودة.\n"
@@ -377,7 +388,7 @@ class handler(BaseHTTPRequestHandler):
       req_body = json.dumps({
           "system_instruction": {"parts": [{"text": system_instruction}]},
           "contents": contents,
-          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 260},
+          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 340},
       }).encode("utf-8")
 
       try:
