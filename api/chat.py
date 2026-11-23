@@ -80,6 +80,21 @@ def load_store_data():
   return _cache["entries"]
 
 
+def list_available_models():
+  url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+  req = urllib.request.Request(url, method="GET")
+  with urllib.request.urlopen(req, timeout=12) as resp:
+    data = json.loads(resp.read().decode("utf-8"))
+  names = []
+  for m in data.get("models", []):
+    methods = m.get("supportedGenerationMethods", [])
+    if "generateContent" in methods:
+      name = m.get("name", "").replace("models/", "")
+      if name:
+        names.append(name)
+  return names[:25]
+
+
 def search_store(query, entries, top_k=2):
   words = [w for w in query.lower().split() if len(w) > 1]
   scored = []
@@ -141,6 +156,17 @@ class handler(BaseHTTPRequestHandler):
     history = payload.get("history", [])
     if not msg:
       self._send_json(400, {"reply": "اكتب سؤالك أولاً."})
+      return
+
+    if msg.lower() == "models":
+      try:
+        avail = list_available_models()
+        self._send_json(
+            200,
+            {"reply": "الموديلات المتاحة:\n" + "\n".join(avail)},
+        )
+      except Exception as e:
+        self._send_json(502, {"reply": f"تعذر جلب الموديلات: {str(e)[:180]}"})
       return
 
     entries = load_store_data()
