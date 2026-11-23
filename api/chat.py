@@ -26,7 +26,9 @@ _cache = {"entries": [], "fetched_at": 0}
 
 def normalize_ar(text):
   text = str(text or "").lower()
-  text = text.replace("\u200c", " ").replace("\u200f", " ").replace("\u200e", " ")
+  text = (
+      text.replace("\u200c", " ").replace("\u200f", " ").replace("\u200e", " ")
+  )
   text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
   text = re.sub(r"[أإآاٱ]", "ا", text)
   text = text.replace("ى", "ي").replace("ي", "ي").replace("ة", "ه")
@@ -93,8 +95,12 @@ def load_store_data():
     )
     with urllib.request.urlopen(req, timeout=8) as resp:
       raw_data = json.loads(resp.read().decode("utf-8"))
-      products = raw_data.get("products") if isinstance(raw_data, dict) else raw_data
-      entries = extract_entries(products if products is not None else raw_data)
+      products = (
+          raw_data.get("products") if isinstance(raw_data, dict) else raw_data
+      )
+      entries = extract_entries(
+          products if products is not None else raw_data
+      )
       if entries:
         _cache["entries"] = entries
         _cache["fetched_at"] = now
@@ -139,6 +145,27 @@ def search_store(query, entries, top_k=4):
     if t:
       summary.append(f"- {t}")
   return "المنتجات المتوفرة في المتجر:\n" + "\n".join(summary)
+
+
+def find_matching_product_id(text_pool, entries):
+  norm_pool = normalize_ar(text_pool)
+  best_id = None
+  best_score = 0
+
+  for item in entries:
+    title = item.get("title", "")
+    content = item.get("content", "")
+    norm_title = normalize_ar(title)
+    words = [w for w in norm_title.split() if len(w) >= 3]
+    score = sum(1 for w in words if w in norm_pool)
+
+    if score > best_score and score >= 1:
+      m = re.search(r"\bid:\s*([^\n]+)", content)
+      if m:
+        best_score = score
+        best_id = m.group(1).strip()
+
+  return best_id
 
 
 class handler(BaseHTTPRequestHandler):
@@ -250,7 +277,10 @@ class handler(BaseHTTPRequestHandler):
       except urllib.error.HTTPError as e:
         err_detail = e.read().decode("utf-8", errors="ignore")[:180]
         if e.code in (503, 429, 404):
-          last_err = "المساعد يمر بضغط مؤقت الآن، جرّب ترسل السؤال مرة ثانية بعد لحظات."
+          last_err = (
+              "المساعد يمر بضغط مؤقت الآن، جرّب ترسل السؤال مرة ثانية بعد"
+              " لحظات."
+          )
           continue
         last_err = f"خطأ من Gemini ({e.code}): {err_detail}"
         break
@@ -269,7 +299,27 @@ class handler(BaseHTTPRequestHandler):
         .get("text", "")
         .strip()
     )
+
+    add_to_cart_id = None
+    confirm_words = (
+        "نعم",
+        "ايه",
+        "اي",
+        "تمام",
+        "ضيفه",
+        "اضفه",
+        "ثبت",
+        "موافق",
+    )
+    if any(w in normalize_ar(msg) for w in confirm_words):
+      add_to_cart_id = find_matching_product_id(
+          f"{recent_text} {reply}", entries
+      )
+
     self._send_json(
         200,
-        {"reply": reply or "عذراً، لم أتمكن من العثور على إجابة واضحة."},
+        {
+            "reply": reply or "عذراً، لم أتمكن من العثور على إجابة واضحة.",
+            "add_to_cart_id": add_to_cart_id,
+        },
     )
