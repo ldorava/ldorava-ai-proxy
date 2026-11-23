@@ -11,7 +11,13 @@ STORE_JSON_URL = os.environ.get(
     "https://raw.githubusercontent.com/ldorava/Ldorava/main/data/store.json",
 ).strip()
 ALLOWED_ORIGIN = "https://ldorava.github.io"
-MODEL_NAME = "gemini-3.8-flash"
+
+MODELS_PRIORITY = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+]
 
 CACHE_TTL_SECONDS = 300
 _cache = {"entries": [], "fetched_at": 0}
@@ -80,21 +86,6 @@ def load_store_data():
   return _cache["entries"]
 
 
-def list_available_models():
-  url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
-  req = urllib.request.Request(url, method="GET")
-  with urllib.request.urlopen(req, timeout=12) as resp:
-    data = json.loads(resp.read().decode("utf-8"))
-  names = []
-  for m in data.get("models", []):
-    methods = m.get("supportedGenerationMethods", [])
-    if "generateContent" in methods:
-      name = m.get("name", "").replace("models/", "")
-      if name:
-        names.append(name)
-  return names[:25]
-
-
 def search_store(query, entries, top_k=2):
   words = [w for w in query.lower().split() if len(w) > 1]
   scored = []
@@ -158,17 +149,6 @@ class handler(BaseHTTPRequestHandler):
       self._send_json(400, {"reply": "اكتب سؤالك أولاً."})
       return
 
-    if msg.lower() == "models":
-      try:
-        avail = list_available_models()
-        self._send_json(
-            200,
-            {"reply": "الموديلات المتاحة:\n" + "\n".join(avail)},
-        )
-      except Exception as e:
-        self._send_json(502, {"reply": f"تعذر جلب الموديلات: {str(e)[:180]}"})
-      return
-
     entries = load_store_data()
     if not entries:
       self._send_json(
@@ -204,41 +184,40 @@ class handler(BaseHTTPRequestHandler):
         )
     contents.append({"role": "user", "parts": [{"text": msg}]})
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
-    req_body = json.dumps({
-        "system_instruction": {"parts": [{"text": system_instruction}]},
-        "contents": contents,
-        "generationConfig": {"temperature": 0.15, "maxOutputTokens": 200},
-    }).encode("utf-8")
+    res_json = None
+    last_err = ""
 
-    try:
-      req = urllib.request.Request(
-          url,
-          data=req_body,
-          headers={"Content-Type": "application/json"},
-          method="POST",
-      )
-      with urllib.request.urlopen(req, timeout=15) as resp:
-        res_json = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-      err_detail = e.read().decode("utf-8", errors="ignore")[:200]
-      if e.code == 503:
-        self._send_json(
-            502,
-            {
-                "reply": (
-                    "المساعد يمر بضغط مؤقت الآن، جرّب ترسل السؤال مرة ثانية"
-                    " بعد لحظات."
-                )
-            },
+    for model_name in MODELS_PRIORITY:
+      url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+      req_body = json.dumps({
+          "system_instruction": {"parts": [{"text": system_instruction}]},
+          "contents": contents,
+          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 250},
+      }).encode("utf-8")
+
+      try:
+        req = urllib.request.Request(
+            url,
+            data=req_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-      else:
-        self._send_json(
-            502, {"reply": f"خطأ من Gemini ({e.code}): {err_detail}"}
-        )
-      return
-    except Exception as e:
-      self._send_json(502, {"reply": f"تعذر الاتصال بـ Gemini: {str(e)[:180]}"})
+        with urllib.request.urlopen(req, timeout=14) as resp:
+          res_json = json.loads(resp.read().decode("utf-8"))
+        break
+      except urllib.error.HTTPError as e:
+        err_detail = e.read().decode("utf-8", errors="ignore")[:180]
+        if e.code in (503, 429, 404):
+          last_err = "المساعد يمر بضغط مؤقت الآن، جرّب ترسل السؤال مرة ثانية بعد لحظات."
+          continue
+        last_err = f"خطأ من Gemini ({e.code}): {err_detail}"
+        break
+      except Exception as e:
+        last_err = f"تعذر الاتصال بـ Gemini: {str(e)[:180]}"
+        continue
+
+    if res_json is None:
+      self._send_json(502, {"reply": last_err})
       return
 
     reply = (
