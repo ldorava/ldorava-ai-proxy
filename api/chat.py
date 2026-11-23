@@ -20,15 +20,16 @@ MODELS_PRIORITY = [
     "gemini-3.5-flash-lite",
 ]
 
-CACHE_TTL_SECONDS = 300
+CACHE_TTL_SECONDS = 30
 _cache = {"entries": [], "fetched_at": 0}
 
 
 def normalize_ar(text):
   text = str(text or "").lower()
+  text = text.replace("\u200c", " ").replace("\u200f", " ").replace("\u200e", " ")
   text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
-  text = re.sub(r"[أإآا]", "ا", text)
-  text = text.replace("ى", "ي").replace("ة", "ه")
+  text = re.sub(r"[أإآاٱ]", "ا", text)
+  text = text.replace("ى", "ي").replace("ي", "ي").replace("ة", "ه")
   text = re.sub(r"[^\w\s\u0600-\u06ff]", " ", text)
   return re.sub(r"\s+", " ", text).strip()
 
@@ -52,7 +53,9 @@ def extract_entries(obj, prefix=""):
 
     parts = []
     for k, v in obj.items():
-      if k in ("title", "name", "product_name", "label"):
+      if k in ("title", "name", "product_name", "label", "image"):
+        continue
+      if v is None or v == "" or v == []:
         continue
       if isinstance(v, (str, int, float, bool)):
         parts.append(f"{k}: {v}")
@@ -60,13 +63,17 @@ def extract_entries(obj, prefix=""):
         sub_texts = []
         for sub in v:
           if isinstance(sub, dict):
-            sub_texts.append(
-                ", ".join(f"{sk}: {sv}" for sk, sv in sub.items())
-            )
+            sub_items = [
+                f"{sk}: {sv}"
+                for sk, sv in sub.items()
+                if sk != "image" and sv not in (None, "", [])
+            ]
+            if sub_items:
+              sub_texts.append(" | ".join(sub_items))
           else:
             sub_texts.append(str(sub))
         if sub_texts:
-          parts.append(f"{k}: {' | '.join(sub_texts)}")
+          parts.append(f"{k}: {' // '.join(sub_texts)}")
       elif isinstance(v, dict):
         results.extend(extract_entries(v, f"{title} - {k}"))
 
@@ -86,7 +93,8 @@ def load_store_data():
     )
     with urllib.request.urlopen(req, timeout=8) as resp:
       raw_data = json.loads(resp.read().decode("utf-8"))
-      entries = extract_entries(raw_data)
+      products = raw_data.get("products") if isinstance(raw_data, dict) else raw_data
+      entries = extract_entries(products if products is not None else raw_data)
       if entries:
         _cache["entries"] = entries
         _cache["fetched_at"] = now
@@ -110,27 +118,27 @@ def search_store(query, entries, top_k=4):
     score = 0
     for w in words:
       if re.search(rf"\b{re.escape(w)}\b", norm_title):
-        score += 5
+        score += 6
       elif w in norm_title:
-        score += 3
+        score += 4
       elif re.search(rf"\b{re.escape(w)}\b", norm_haystack):
         score += 2
       elif len(w) >= 3 and w in norm_haystack:
         score += 1
 
     if score > 0:
-      scored.append((score, f"[{title}]\n{content[:600]}"))
+      scored.append((score, f"[{title}]\n{content[:1200]}"))
 
   scored.sort(key=lambda x: x[0], reverse=True)
   if scored:
     return "\n\n---\n\n".join(x[1] for x in scored[:top_k])
 
   summary = []
-  for x in entries[:6]:
+  for x in entries[:10]:
     t = x.get("title", "").strip()
     if t:
       summary.append(f"- {t}")
-  return "المنتجات المذكورة في البيانات:\n" + "\n".join(summary)
+  return "المنتجات المتوفرة في المتجر:\n" + "\n".join(summary)
 
 
 class handler(BaseHTTPRequestHandler):
@@ -195,12 +203,14 @@ class handler(BaseHTTPRequestHandler):
     system_instruction = (
         "أنت مساعد مبيعات ودود لمتجر L'DORA Viva. أجب بلهجة طبيعية، لبقة،"
         " ومختصرة بالاعتماد على بيانات المتجر أدناه فقط.\n"
-        "- لا تخترع منتجات أو أسعار أو مواصفات غير موجودة في البيانات.\n"
-        "- إذا سأل الزبون عن منتج غير متوفر، وضّح ذلك بلطف وبأسلوب طبيعي"
-        " متنوع (تجنب تكرار عبارة 'عذراً، لا يوجد' بشكل جامد)، واذكر أقرب"
-        " المنتجات أو الفئات المتوفرة فعلاً.\n"
-        "- إذا كتب الزبون جزءاً من اسم منتج، اعرض المطابقات أو الأقرب"
-        " لها بوضوح.\n\n"
+        "- التزم بالأسعار والعملة (د.ع) والمواصفات وطريقة الاستخدام"
+        " والأنواع الموجودة في البيانات بدقة، ولا تخترع أسعاراً أو منتجات"
+        " غير موجودة.\n"
+        "- إذا كتب الزبون جزءاً من اسم منتج أو فئة، اعرض المنتجات المطابقة"
+        " أو الأقرب لها بوضوح.\n"
+        "- إذا سأل الزبون عن منتج غير موجود فعلاً في البيانات، وضّح ذلك"
+        " بلطف وبأسلوب طبيعي متنوع دون تكرار قالب جامد، واقترح بدائل"
+        " مناسبة من البيانات.\n\n"
         f"بيانات المتجر:\n{context}"
     )
 
