@@ -14,13 +14,13 @@ STORE_JSON_URL = os.environ.get(
 ALLOWED_ORIGIN = "https://ldorava.github.io"
 
 MODELS_PRIORITY = [
-    "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-3.5-flash",
+    "gemini-2.5-flash",
     "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
 ]
 
-CACHE_TTL_SECONDS = 30
+CACHE_TTL_SECONDS = 60
 _cache = {"entries": [], "fetched_at": 0}
 
 
@@ -93,7 +93,7 @@ def load_store_data():
     req = urllib.request.Request(
         STORE_JSON_URL, headers={"User-Agent": "LdoravaBot/1.0"}
     )
-    with urllib.request.urlopen(req, timeout=8) as resp:
+    with urllib.request.urlopen(req, timeout=6) as resp:
       raw_data = json.loads(resp.read().decode("utf-8"))
       products = (
           raw_data.get("products") if isinstance(raw_data, dict) else raw_data
@@ -110,7 +110,7 @@ def load_store_data():
   return _cache["entries"]
 
 
-def search_store(query, entries, top_k=4):
+def search_store(query, entries, top_k=3):
   norm_q = normalize_ar(query)
   words = [w for w in norm_q.split() if len(w) >= 2]
   scored = []
@@ -124,23 +124,23 @@ def search_store(query, entries, top_k=4):
     score = 0
     for w in words:
       if re.search(rf"\b{re.escape(w)}\b", norm_title):
-        score += 6
+        score += 8
       elif w in norm_title:
-        score += 4
+        score += 5
       elif re.search(rf"\b{re.escape(w)}\b", norm_haystack):
         score += 2
       elif len(w) >= 3 and w in norm_haystack:
         score += 1
 
     if score > 0:
-      scored.append((score, f"[{title}]\n{content[:1200]}"))
+      scored.append((score, f"[{title}]\n{content[:1000]}"))
 
   scored.sort(key=lambda x: x[0], reverse=True)
   if scored:
     return "\n\n---\n\n".join(x[1] for x in scored[:top_k])
 
   summary = []
-  for x in entries[:10]:
+  for x in entries[:8]:
     t = x.get("title", "").strip()
     if t:
       summary.append(f"- {t}")
@@ -225,32 +225,33 @@ class handler(BaseHTTPRequestHandler):
     recent_text = " ".join(
         h.get("text", "") for h in history[-2:] if isinstance(h, dict)
     )
-    context = search_store(f"{recent_text} {msg}".strip(), entries, top_k=4)
+    context = search_store(f"{recent_text} {msg}".strip(), entries, top_k=3)
 
     system_instruction = (
-        "أنت مساعد مبيعات ودود لمتجر L'DORA Viva. أجب بلهجة طبيعية، لبقة،"
-        " ومختصرة بالاعتماد على بيانات المتجر أدناه فقط.\n"
-        "- التزم بالأسعار والعملة (د.ع) والمواصفات وطريقة الاستخدام"
-        " والأنواع الموجودة في البيانات بدقة، ولا تخترع أسعاراً أو منتجات"
-        " غير موجودة.\n"
-        "- إذا كتب الزبون جزءاً من اسم منتج أو فئة، اعرض المنتجات المطابقة"
-        " أو الأقرب لها بوضوح.\n"
-        "- إذا سأل الزبون عن منتج غير موجود فعلاً في البيانات، وضّح ذلك"
-        " بلطف وبأسلوب طبيعي متنوع دون تكرار قالب جامد، واقترح بدائل"
-        " مناسبة من البيانات.\n\n"
+        "أنت مساعد مبيعات سريع ودقيق لمتجر L'DORA Viva. أجب بإيجاز ووضوح"
+        " بالاعتماد على بيانات المتجر أدناه فقط.\n"
+        "- اعتمد على بيانات المتجر كمرجع وحيد للأسعار (د.ع) والتوفر"
+        " والمواصفات وطريقة الاستخدام (usage) والأنواع (variants).\n"
+        "- إذا وُجد المنتج في البيانات (مثل غسول الجسم 300مل بسعر 10000"
+        " د.ع)، أجب مباشرة بتوفره وسعره أو طريقة استخدامه من حقل usage"
+        " ولا تقل أبداً إنه غير متوفر.\n"
+        "- لا تقلد أخطاء سابقة من سجل المحادثة ولا تخلط بين المنتجات.\n"
+        "- إذا كان المنتج غير موجود فعلاً في البيانات، قل ذلك باختصار"
+        " واقترح منتجاً قريباً موجوداً فعلاً.\n\n"
         f"بيانات المتجر:\n{context}"
     )
 
     contents = []
-    for h in history[-4:]:
+    for h in history[-2:]:
       if (
           isinstance(h, dict)
           and h.get("role") in ("user", "model")
           and h.get("text")
       ):
-        contents.append(
-            {"role": h["role"], "parts": [{"text": str(h["text"])[:300]}]}
-        )
+        txt = str(h["text"]).strip()
+        if h.get("role") == "model" and "غير متوفر" in txt:
+          continue
+        contents.append({"role": h["role"], "parts": [{"text": txt[:220]}]})
     contents.append({"role": "user", "parts": [{"text": msg}]})
 
     res_json = None
@@ -261,7 +262,7 @@ class handler(BaseHTTPRequestHandler):
       req_body = json.dumps({
           "system_instruction": {"parts": [{"text": system_instruction}]},
           "contents": contents,
-          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 250},
+          "generationConfig": {"temperature": 0.1, "maxOutputTokens": 180},
       }).encode("utf-8")
 
       try:
@@ -271,7 +272,7 @@ class handler(BaseHTTPRequestHandler):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=14) as resp:
+        with urllib.request.urlopen(req, timeout=11) as resp:
           res_json = json.loads(resp.read().decode("utf-8"))
         break
       except urllib.error.HTTPError as e:
