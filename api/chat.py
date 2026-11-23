@@ -80,7 +80,7 @@ def load_store_data():
   return _cache["entries"]
 
 
-def search_store(query, entries, top_k=4):
+def search_store(query, entries, top_k=2):
   words = [w for w in query.lower().split() if len(w) > 1]
   scored = []
   for item in entries:
@@ -89,14 +89,15 @@ def search_store(query, entries, top_k=4):
     haystack = f"{title} {content}".lower()
     score = sum(1 for w in words if w in haystack)
     if score > 0:
-      scored.append((score, f"[{title}]\n{content}"))
+      scored.append((score, f"[{title}]\n{content[:500]}"))
 
   scored.sort(key=lambda x: x[0], reverse=True)
   if scored:
     return "\n\n---\n\n".join(x[1] for x in scored[:top_k])
 
   return "\n\n---\n\n".join(
-      f"[{x.get('title', '')}]\n{x.get('content', '')}" for x in entries[:top_k]
+      f"[{x.get('title', '')}]\n{x.get('content', '')[:500]}"
+      for x in entries[:top_k]
   )
 
 
@@ -157,26 +158,23 @@ class handler(BaseHTTPRequestHandler):
     recent_text = " ".join(
         h.get("text", "") for h in history[-2:] if isinstance(h, dict)
     )
-    context = search_store(f"{recent_text} {msg}".strip(), entries)
+    context = search_store(f"{recent_text} {msg}".strip(), entries, top_k=2)
 
     system_instruction = (
-        "أنت مساعد مبيعات لمتجر Ldorava. أجب الزبائن بوضوح ودقة بالاعتماد"
-        " على بيانات المتجر أدناه.\n"
-        "- التزم بالأسعار والمواصفات والتفاصيل الموجودة في البيانات ولا تخترع"
-        " أرقاماً غير موجودة.\n"
-        "- إذا لم تجد تفصيلاً محدداً في البيانات، وضّح ذلك للزبون بكل وضوح.\n\n"
+        "أنت مساعد مبيعات لمتجر Ldorava. أجب الزبائن بإيجاز ودقة بالاعتماد"
+        " على بيانات المتجر أدناه فقط ولا تخترع معلومات.\n\n"
         f"بيانات المتجر:\n{context}"
     )
 
     contents = []
-    for h in history[-6:]:
+    for h in history[-4:]:
       if (
           isinstance(h, dict)
           and h.get("role") in ("user", "model")
           and h.get("text")
       ):
         contents.append(
-            {"role": h["role"], "parts": [{"text": str(h["text"])[:400]}]}
+            {"role": h["role"], "parts": [{"text": str(h["text"])[:300]}]}
         )
     contents.append({"role": "user", "parts": [{"text": msg}]})
 
@@ -184,42 +182,37 @@ class handler(BaseHTTPRequestHandler):
     req_body = json.dumps({
         "system_instruction": {"parts": [{"text": system_instruction}]},
         "contents": contents,
-        "generationConfig": {"temperature": 0.15, "maxOutputTokens": 300},
+        "generationConfig": {"temperature": 0.15, "maxOutputTokens": 200},
     }).encode("utf-8")
 
-    res_json = None
-    last_err = ""
-
-    for attempt in range(2):
-      try:
-        req = urllib.request.Request(
-            url,
-            data=req_body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+    try:
+      req = urllib.request.Request(
+          url,
+          data=req_body,
+          headers={"Content-Type": "application/json"},
+          method="POST",
+      )
+      with urllib.request.urlopen(req, timeout=15) as resp:
+        res_json = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+      err_detail = e.read().decode("utf-8", errors="ignore")[:200]
+      if e.code == 503:
+        self._send_json(
+            502,
+            {
+                "reply": (
+                    "المساعد يمر بضغط مؤقت الآن، جرّب ترسل السؤال مرة ثانية"
+                    " بعد لحظات."
+                )
+            },
         )
-        with urllib.request.urlopen(req, timeout=12) as resp:
-          res_json = json.loads(resp.read().decode("utf-8"))
-        break
-      except urllib.error.HTTPError as e:
-        err_detail = e.read().decode("utf-8", errors="ignore")[:220]
-        if e.code == 503:
-          last_err = "المساعد يمر بضغط مؤقت الآن، جرّب ترسل السؤال مرة ثانية بعد لحظات."
-        else:
-          last_err = f"خطأ من Gemini ({e.code}): {err_detail}"
-        if e.code in (503, 429) and attempt == 0:
-          time.sleep(0.6)
-          continue
-        break
-      except Exception as e:
-        last_err = f"تعذر الاتصال بـ Gemini: {str(e)[:180]}"
-        if attempt == 0:
-          time.sleep(0.6)
-          continue
-        break
-
-    if res_json is None:
-      self._send_json(502, {"reply": last_err})
+      else:
+        self._send_json(
+            502, {"reply": f"خطأ من Gemini ({e.code}): {err_detail}"}
+        )
+      return
+    except Exception as e:
+      self._send_json(502, {"reply": f"تعذر الاتصال بـ Gemini: {str(e)[:180]}"})
       return
 
     reply = (
