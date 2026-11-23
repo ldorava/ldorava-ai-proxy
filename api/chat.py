@@ -407,7 +407,7 @@ class handler(BaseHTTPRequestHandler):
       req_body = json.dumps({
           "system_instruction": {"parts": [{"text": system_instruction}]},
           "contents": contents,
-          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 650},
+          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 950},
       }).encode("utf-8")
 
       try:
