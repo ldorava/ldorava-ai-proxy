@@ -1,6 +1,7 @@
 from http.server import BaseHTTPRequestHandler
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -21,6 +22,15 @@ MODELS_PRIORITY = [
 
 CACHE_TTL_SECONDS = 300
 _cache = {"entries": [], "fetched_at": 0}
+
+
+def normalize_ar(text):
+  text = str(text or "").lower()
+  text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
+  text = re.sub(r"[أإآا]", "ا", text)
+  text = text.replace("ى", "ي").replace("ة", "ه")
+  text = re.sub(r"[^\w\s\u0600-\u06ff]", " ", text)
+  return re.sub(r"\s+", " ", text).strip()
 
 
 def extract_entries(obj, prefix=""):
@@ -86,23 +96,37 @@ def load_store_data():
   return _cache["entries"]
 
 
-def search_store(query, entries, top_k=2):
-  words = [w for w in query.lower().split() if len(w) > 1]
+def search_store(query, entries, top_k=4):
+  norm_q = normalize_ar(query)
+  words = [w for w in norm_q.split() if len(w) >= 2]
   scored = []
+
   for item in entries:
     title = item.get("title", "")
     content = item.get("content", "")
-    haystack = f"{title} {content}".lower()
-    score = sum(1 for w in words if w in haystack)
+    norm_title = normalize_ar(title)
+    norm_haystack = f"{norm_title} {normalize_ar(content)}"
+
+    score = 0
+    for w in words:
+      if re.search(rf"\b{re.escape(w)}\b", norm_title):
+        score += 5
+      elif w in norm_title:
+        score += 3
+      elif re.search(rf"\b{re.escape(w)}\b", norm_haystack):
+        score += 2
+      elif len(w) >= 3 and w in norm_haystack:
+        score += 1
+
     if score > 0:
-      scored.append((score, f"[{title}]\n{content[:500]}"))
+      scored.append((score, f"[{title}]\n{content[:600]}"))
 
   scored.sort(key=lambda x: x[0], reverse=True)
   if scored:
     return "\n\n---\n\n".join(x[1] for x in scored[:top_k])
 
   return "\n\n---\n\n".join(
-      f"[{x.get('title', '')}]\n{x.get('content', '')[:500]}"
+      f"[{x.get('title', '')}]\n{x.get('content', '')[:600]}"
       for x in entries[:top_k]
   )
 
@@ -164,11 +188,13 @@ class handler(BaseHTTPRequestHandler):
     recent_text = " ".join(
         h.get("text", "") for h in history[-2:] if isinstance(h, dict)
     )
-    context = search_store(f"{recent_text} {msg}".strip(), entries, top_k=2)
+    context = search_store(f"{recent_text} {msg}".strip(), entries, top_k=4)
 
     system_instruction = (
         "أنت مساعد مبيعات لمتجر Ldorava. أجب الزبائن بإيجاز ودقة بالاعتماد"
-        " على بيانات المتجر أدناه فقط ولا تخترع معلومات.\n\n"
+        " على بيانات المتجر أدناه فقط ولا تخترع معلومات. إذا كتب الزبون"
+        " جزءاً من اسم منتج أو فئة، اطرح المنتجات المطابقة أو الأقرب"
+        " الموجودة في البيانات.\n\n"
         f"بيانات المتجر:\n{context}"
     )
 
