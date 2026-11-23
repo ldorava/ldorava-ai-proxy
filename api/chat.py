@@ -15,7 +15,9 @@ GUIDE_TXT_URL = os.environ.get(
     "GUIDE_TXT_URL",
     "https://raw.githubusercontent.com/ldorava/Ldorava/main/data/guide.txt",
 ).strip()
-ALLOWED_ORIGIN = "https://ldorava.github.io"
+ALLOWED_ORIGIN = os.environ.get(
+    "ALLOWED_ORIGIN", "https://ldorava.github.io"
+).strip()
 
 MODELS_PRIORITY = [
     "gemini-2.5-flash-lite",
@@ -26,8 +28,10 @@ MODELS_PRIORITY = [
 
 CACHE_TTL_SECONDS = 60
 _cache = {
-    "entries": [],
-    "fetched_at": 0,
+    "store_entries": [],
+    "store_fetched_at": 0,
+    "guide_entries": [],
+    "guide_fetched_at": 0,
 }
 
 
@@ -39,7 +43,7 @@ def normalize_ar(text):
   text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
   text = re.sub(r"[أإآاٱ]", "ا", text)
   text = text.replace("ى", "ي").replace("ي", "ي").replace("ة", "ه")
-  text = re.sub(r"[^\w\s\u0600-\u6ff]", " ", text)
+  text = re.sub(r"[^\w\s\u0600-\u06ff]", " ", text)
   return re.sub(r"\s+", " ", text).strip()
 
 
@@ -110,7 +114,7 @@ def parse_guide_text(raw_text):
   return guide_entries
 
 
-def fetch_url_text(url, timeout=6):
+def fetch_url_text(url, timeout=4):
   if not url:
     return ""
   req = urllib.request.Request(url, headers={"User-Agent": "LdoravaBot/1.0"})
@@ -118,15 +122,16 @@ def fetch_url_text(url, timeout=6):
     return resp.read().decode("utf-8", errors="ignore")
 
 
-def load_all_data():
+def load_store_entries():
   now = time.time()
-  if _cache["entries"] and (now - _cache["fetched_at"]) < CACHE_TTL_SECONDS:
-    return _cache["entries"]
-
-  combined = []
+  if (
+      _cache["store_entries"]
+      and (now - _cache["store_fetched_at"]) < CACHE_TTL_SECONDS
+  ):
+    return _cache["store_entries"]
 
   try:
-    raw_store = fetch_url_text(STORE_JSON_URL, timeout=6)
+    raw_store = fetch_url_text(STORE_JSON_URL, timeout=4)
     if raw_store:
       store_json = json.loads(raw_store)
       products = (
@@ -134,24 +139,41 @@ def load_all_data():
           if isinstance(store_json, dict)
           else store_json
       )
-      combined.extend(
-          extract_entries(products if products is not None else store_json)
+      entries = extract_entries(
+          products if products is not None else store_json
       )
+      if entries:
+        _cache["store_entries"] = entries
+        _cache["store_fetched_at"] = now
   except Exception:
     pass
+
+  return _cache["store_entries"]
+
+
+def load_guide_entries():
+  now = time.time()
+  if (
+      _cache["guide_entries"]
+      and (now - _cache["guide_fetched_at"]) < CACHE_TTL_SECONDS
+  ):
+    return _cache["guide_entries"]
 
   try:
-    raw_guide = fetch_url_text(GUIDE_TXT_URL, timeout=6)
+    raw_guide = fetch_url_text(GUIDE_TXT_URL, timeout=4)
     if raw_guide:
-      combined.extend(parse_guide_text(raw_guide))
+      entries = parse_guide_text(raw_guide)
+      if entries:
+        _cache["guide_entries"] = entries
+        _cache["guide_fetched_at"] = now
   except Exception:
     pass
 
-  if combined:
-    _cache["entries"] = combined
-    _cache["fetched_at"] = now
+  return _cache["guide_entries"]
 
-  return _cache["entries"]
+
+def load_all_data():
+  return load_store_entries() + load_guide_entries()
 
 
 def search_store(query, entries, top_k=4):
@@ -194,7 +216,6 @@ def search_store(query, entries, top_k=4):
 def build_context(combined_q, entries):
   norm_q = normalize_ar(combined_q)
 
-  # 1) أسئلة معرفة نوع البشرة أو أنواع البشرة
   if any(
       k in norm_q
       for k in ("نوع بشرت", "انواع البشر", "اعرف بشرت", "تحديد البشر")
@@ -212,7 +233,6 @@ def build_context(combined_q, entries):
     if parts:
       return "\n\n---\n\n".join(parts)
 
-  # 2) أسئلة معرفة نوع الشعر أو أنواع الشعر
   if any(
       k in norm_q for k in ("نوع شعر", "انواع الشعر", "اعرف شعر", "تحديد الشعر")
   ):
@@ -229,7 +249,6 @@ def build_context(combined_q, entries):
     if parts:
       return "\n\n---\n\n".join(parts)
 
-  # 3) أسئلة الباقات العلاجية أو التفتيح أو الشعر
   if any(
       k in norm_q for k in ("باقه", "باقات", "مجموعه", "مجموعات", "بكج", "بكجات")
   ):
@@ -240,25 +259,31 @@ def build_context(combined_q, entries):
   return search_store(combined_q, entries, top_k=4)
 
 
-def find_matching_product_id(text_pool, entries):
+def find_matching_product_id(text_pool, store_entries):
   norm_pool = normalize_ar(text_pool)
   best_id = None
   best_score = 0
 
-  for item in entries:
+  for item in store_entries:
     title = item.get("title", "")
     content = item.get("content", "")
-    if "\nid:" not in f"\n{content}" and not content.startswith("id:"):
+    m = re.search(r"\bid:\s*([^\n]+)", content)
+    if not m:
       continue
+
+    product_id = m.group(1).strip()
     norm_title = normalize_ar(title)
     words = [w for w in norm_title.split() if len(w) >= 3]
+    if not words:
+      continue
+
     score = sum(1 for w in words if w in norm_pool)
+    if norm_title and norm_title in norm_pool:
+      score += 5
 
     if score > best_score and score >= 1:
-      m = re.search(r"\bid:\s*([^\n]+)", content)
-      if m:
-        best_score = score
-        best_id = m.group(1).strip()
+      best_score = score
+      best_id = product_id
 
   return best_id
 
@@ -305,7 +330,10 @@ class handler(BaseHTTPRequestHandler):
       self._send_json(400, {"reply": "اكتب سؤالك أولاً."})
       return
 
-    entries = load_all_data()
+    store_entries = load_store_entries()
+    guide_entries = load_guide_entries()
+    entries = store_entries + guide_entries
+
     if not entries:
       self._send_json(
           200,
@@ -414,9 +442,9 @@ class handler(BaseHTTPRequestHandler):
         "ثبت",
         "موافق",
     )
-    if any(w in normalize_ar(msg) for w in confirm_words):
+    if store_entries and any(w in normalize_ar(msg) for w in confirm_words):
       add_to_cart_id = find_matching_product_id(
-          f"{recent_text} {reply}", entries
+          f"{recent_text} {reply}", store_entries
       )
 
     self._send_json(
