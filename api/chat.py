@@ -172,10 +172,6 @@ def load_guide_entries():
   return _cache["guide_entries"]
 
 
-def load_all_data():
-  return load_store_entries() + load_guide_entries()
-
-
 def search_store(query, entries, top_k=4):
   norm_q = normalize_ar(query)
   words = [w for w in norm_q.split() if len(w) >= 2]
@@ -242,6 +238,23 @@ def build_context(combined_q, entries):
         "الشعر الدهني",
         "الشعر المختلط",
         "العناية بالشعر العادي",
+    ):
+      found = search_store(topic, entries, top_k=1)
+      if found and found not in parts:
+        parts.append(found)
+    if parts:
+      return "\n\n---\n\n".join(parts)
+
+  if any(
+      k in norm_q for k in ("صابون", "صابونه", "غسول", "يناسبني", "تناسبني")
+  ):
+    parts = []
+    for topic in (
+        "تحديد البشرة الجافة",
+        "البشرة الدهنية",
+        "البشرة المختلطة",
+        "البشرة الحساسة",
+        "صابون",
     ):
       found = search_store(topic, entries, top_k=1)
       if found and found not in parts:
@@ -353,18 +366,20 @@ class handler(BaseHTTPRequestHandler):
 
     system_instruction = (
         "أنت مساعد مبيعات واستشارات ودود، دقيق، وسريع لمتجر L'DORA Viva. ادخل"
-        " في صلب الإجابة مباشرة دون مقدمات طويلة متكررة، بالاعتماد على"
-        " البيانات والإرشادات أدناه فقط.\n"
+        " في صلب الإجابة مباشرة دون مقدمات طويلة متكررة، وأكمل جملك"
+        " ونقاطك بالكامل دون انقطاع، بالاعتماد على البيانات والإرشادات"
+        " أدناه فقط.\n"
         "- عند السؤال عن معرفة نوع البشرة أو أنواعها: اذكر خطوات الفحص"
         " بترقيم واضح ثم وضّح علامات وطريقة تمييز الأنواع المتوفرة (الجافة،"
         " الدهنية، المختلطة، الحساسة).\n"
+        "- عند السؤال عن الصابون المناسب أو الغسول: وضّح باختصار كيف يحدد"
+        " نوع بشرته أو مشكلته، ثم رشّح الصوابين أو الباقات المتوفرة في"
+        " البيانات مع ذكر سعرها بدقة بعملة (د.ع).\n"
         "- عند السؤال عن معرفة نوع الشعر أو أنواع الشعر: اذكر خطوات الفحص"
         " والعلامات والعناية لكل نوع متوفر في الدليل.\n"
         "- عند السؤال عن الباقات أو العناية أو طريقة الاستخدام: رتّب"
         " المكونات أو الخطوات بنقاط واضحة ومباشرة، واذكر الملاحظات أو"
         " التحذيرات المهمة المرتبطة بها إن وجدت.\n"
-        "- إذا رشّحت منتجاً من بيانات المتجر، اذكر اسمه وسعره بدقة بعملة"
-        " (د.ع) ولا تخترع منتجات أو أسعار غير موجودة.\n"
         "- اختم بسؤال قصير ومفيد واحد فقط لتضييق الخيار عند الحاجة (مثل نوع"
         " البشرة أو المشكلة أو الميزانية).\n"
         "- لا تقلد أخطاء سابقة من سجل المحادثة ولا تخلط بين المنتجات.\n\n"
@@ -392,7 +407,7 @@ class handler(BaseHTTPRequestHandler):
       req_body = json.dumps({
           "system_instruction": {"parts": [{"text": system_instruction}]},
           "contents": contents,
-          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 360},
+          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 650},
       }).encode("utf-8")
 
       try:
