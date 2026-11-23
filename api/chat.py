@@ -68,7 +68,7 @@ def load_store_data():
     req = urllib.request.Request(
         STORE_JSON_URL, headers={"User-Agent": "LdoravaBot/1.0"}
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=8) as resp:
       raw_data = json.loads(resp.read().decode("utf-8"))
       entries = extract_entries(raw_data)
       if entries:
@@ -184,13 +184,13 @@ class handler(BaseHTTPRequestHandler):
     req_body = json.dumps({
         "system_instruction": {"parts": [{"text": system_instruction}]},
         "contents": contents,
-        "generationConfig": {"temperature": 0.15, "maxOutputTokens": 400},
+        "generationConfig": {"temperature": 0.15, "maxOutputTokens": 300},
     }).encode("utf-8")
 
     res_json = None
     last_err = ""
 
-    for attempt in range(3):
+    for attempt in range(2):
       try:
         req = urllib.request.Request(
             url,
@@ -198,7 +198,7 @@ class handler(BaseHTTPRequestHandler):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=12) as resp:
           res_json = json.loads(resp.read().decode("utf-8"))
         break
       except urllib.error.HTTPError as e:
@@ -207,12 +207,15 @@ class handler(BaseHTTPRequestHandler):
           last_err = "المساعد يمر بضغط مؤقت الآن، جرّب ترسل السؤال مرة ثانية بعد لحظات."
         else:
           last_err = f"خطأ من Gemini ({e.code}): {err_detail}"
-        if e.code in (503, 429) and attempt < 2:
-          time.sleep(1.0 * (attempt + 1))
+        if e.code in (503, 429) and attempt == 0:
+          time.sleep(0.6)
           continue
         break
       except Exception as e:
         last_err = f"تعذر الاتصال بـ Gemini: {str(e)[:180]}"
+        if attempt == 0:
+          time.sleep(0.6)
+          continue
         break
 
     if res_json is None:
