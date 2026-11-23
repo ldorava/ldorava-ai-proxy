@@ -11,6 +11,7 @@ STORE_JSON_URL = os.environ.get(
     "https://raw.githubusercontent.com/ldorava/Ldorava/main/data/store.json",
 ).strip()
 ALLOWED_ORIGIN = "https://ldorava.github.io"
+MODEL_NAME = "gemini-3.8-flash"
 
 CACHE_TTL_SECONDS = 300
 _cache = {"entries": [], "fetched_at": 0}
@@ -179,51 +180,43 @@ class handler(BaseHTTPRequestHandler):
         )
     contents.append({"role": "user", "parts": [{"text": msg}]})
 
-    models = [
-        "gemini-3.8-flash",
-        "gemini-2.0-flash",
-    ]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
+    req_body = json.dumps({
+        "system_instruction": {"parts": [{"text": system_instruction}]},
+        "contents": contents,
+        "generationConfig": {"temperature": 0.15, "maxOutputTokens": 400},
+    }).encode("utf-8")
 
     res_json = None
     last_err = ""
 
-    for model_name in models:
-      url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-      req_body = json.dumps({
-          "system_instruction": {"parts": [{"text": system_instruction}]},
-          "contents": contents,
-          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 400},
-      }).encode("utf-8")
-
-      for attempt in range(2):
-        try:
-          req = urllib.request.Request(
-              url,
-              data=req_body,
-              headers={"Content-Type": "application/json"},
-              method="POST",
-          )
-          with urllib.request.urlopen(req, timeout=20) as resp:
-            res_json = json.loads(resp.read().decode("utf-8"))
-          break
-        except urllib.error.HTTPError as e:
-          err_detail = e.read().decode("utf-8", errors="ignore")[:220]
-          last_err = f"خطأ من Gemini ({e.code}) [{model_name}]: {err_detail}"
-          if e.code in (503, 429) and attempt == 0:
-            time.sleep(1.5)
-            continue
-          break
-        except Exception as e:
-          last_err = f"تعذر الاتصال بـ Gemini [{model_name}]: {str(e)[:180]}"
-          break
-
-      if res_json is not None:
+    for attempt in range(3):
+      try:
+        req = urllib.request.Request(
+            url,
+            data=req_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+          res_json = json.loads(resp.read().decode("utf-8"))
+        break
+      except urllib.error.HTTPError as e:
+        err_detail = e.read().decode("utf-8", errors="ignore")[:220]
+        if e.code == 503:
+          last_err = "المساعد يمر بضغط مؤقت الآن، جرّب ترسل السؤال مرة ثانية بعد لحظات."
+        else:
+          last_err = f"خطأ من Gemini ({e.code}): {err_detail}"
+        if e.code in (503, 429) and attempt < 2:
+          time.sleep(1.0 * (attempt + 1))
+          continue
+        break
+      except Exception as e:
+        last_err = f"تعذر الاتصال بـ Gemini: {str(e)[:180]}"
         break
 
     if res_json is None:
-      self._send_json(
-          502, {"reply": last_err or "الخدمة مشغولة حالياً، حاول بعد قليل."}
-      )
+      self._send_json(502, {"reply": last_err})
       return
 
     reply = (
