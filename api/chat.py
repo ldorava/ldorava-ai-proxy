@@ -179,28 +179,51 @@ class handler(BaseHTTPRequestHandler):
         )
     contents.append({"role": "user", "parts": [{"text": msg}]})
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
-    req_body = json.dumps({
-        "system_instruction": {"parts": [{"text": system_instruction}]},
-        "contents": contents,
-        "generationConfig": {"temperature": 0.15, "maxOutputTokens": 400},
-    }).encode("utf-8")
+    models = [
+        "gemini-3.8-flash",
+        "gemini-2.0-flash",
+    ]
 
-    try:
-      req = urllib.request.Request(
-          url,
-          data=req_body,
-          headers={"Content-Type": "application/json"},
-          method="POST",
+    res_json = None
+    last_err = ""
+
+    for model_name in models:
+      url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+      req_body = json.dumps({
+          "system_instruction": {"parts": [{"text": system_instruction}]},
+          "contents": contents,
+          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 400},
+      }).encode("utf-8")
+
+      for attempt in range(2):
+        try:
+          req = urllib.request.Request(
+              url,
+              data=req_body,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=20) as resp:
+            res_json = json.loads(resp.read().decode("utf-8"))
+          break
+        except urllib.error.HTTPError as e:
+          err_detail = e.read().decode("utf-8", errors="ignore")[:220]
+          last_err = f"خطأ من Gemini ({e.code}) [{model_name}]: {err_detail}"
+          if e.code in (503, 429) and attempt == 0:
+            time.sleep(1.5)
+            continue
+          break
+        except Exception as e:
+          last_err = f"تعذر الاتصال بـ Gemini [{model_name}]: {str(e)[:180]}"
+          break
+
+      if res_json is not None:
+        break
+
+    if res_json is None:
+      self._send_json(
+          502, {"reply": last_err or "الخدمة مشغولة حالياً، حاول بعد قليل."}
       )
-      with urllib.request.urlopen(req, timeout=20) as resp:
-        res_json = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-      err_detail = e.read().decode("utf-8", errors="ignore")[:250]
-      self._send_json(502, {"reply": f"خطأ من Gemini ({e.code}): {err_detail}"})
-      return
-    except Exception as e:
-      self._send_json(502, {"reply": f"تعذر الاتصال بـ Gemini: {str(e)[:200]}"})
       return
 
     reply = (
