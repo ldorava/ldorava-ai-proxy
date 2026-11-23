@@ -11,17 +11,32 @@ STORE_JSON_URL = os.environ.get(
     "STORE_JSON_URL",
     "https://raw.githubusercontent.com/ldorava/Ldorava/main/data/store.json",
 ).strip()
+PDF_URLS = [
+    u.strip()
+    for u in os.environ.get(
+        "PDF_URLS",
+        "https://raw.githubusercontent.com/ldorava/Ldorava/main/data/guide.pdf",
+    ).split(",")
+    if u.strip()
+]
 ALLOWED_ORIGIN = "https://ldorava.github.io"
 
 MODELS_PRIORITY = [
-    "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
-    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash-lite",
     "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
 ]
 
-CACHE_TTL_SECONDS = 60
-_cache = {"entries": [], "fetched_at": 0}
+STORE_CACHE_TTL = 60
+PDF_CACHE_TTL = 3600  # ساعة واحدة لتجنب إعادة رفع الملف في كل طلب
+
+_cache = {
+    "store_entries": [],
+    "store_fetched_at": 0,
+    "pdf_files": [],
+    "pdf_fetched_at": 0,
+}
 
 
 def normalize_ar(text):
@@ -86,8 +101,11 @@ def extract_entries(obj, prefix=""):
 
 def load_store_data():
   now = time.time()
-  if _cache["entries"] and (now - _cache["fetched_at"]) < CACHE_TTL_SECONDS:
-    return _cache["entries"]
+  if (
+      _cache["store_entries"]
+      and (now - _cache["store_fetched_at"]) < STORE_CACHE_TTL
+  ):
+    return _cache["store_entries"]
 
   try:
     req = urllib.request.Request(
@@ -102,12 +120,98 @@ def load_store_data():
           products if products is not None else raw_data
       )
       if entries:
-        _cache["entries"] = entries
-        _cache["fetched_at"] = now
+        _cache["store_entries"] = entries
+        _cache["store_fetched_at"] = now
   except Exception:
     pass
 
-  return _cache["entries"]
+  return _cache["store_entries"]
+
+
+def upload_pdf_to_gemini(pdf_bytes, display_name="guide.pdf"):
+  if not GEMINI_API_KEY or not pdf_bytes:
+    return None
+
+  # خطوة 1: بدء جلسة الرفع القابلة للاستئناف (Resumable Upload)
+  start_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}"
+  start_headers = {
+      "X-Goog-Upload-Protocol": "resumable",
+      "X-Goog-Upload-Command": "start",
+      "X-Goog-Upload-Header-Content-Length": str(len(pdf_bytes)),
+      "X-Goog-Upload-Header-Content-Type": "application/pdf",
+      "Content-Type": "application/json",
+  }
+  start_body = json.dumps({"file": {"display_name": display_name}}).encode(
+      "utf-8"
+  )
+
+  req1 = urllib.request.Request(
+      start_url, data=start_body, headers=start_headers, method="POST"
+  )
+  with urllib.request.urlopen(req1, timeout=12) as resp1:
+    upload_url = resp1.headers.get("X-Goog-Upload-URL")
+
+  if not upload_url:
+    return None
+
+  # خطوة 2: رفع بايتات ملف الـ PDF وإنهاء الجلسة
+  upload_headers = {
+      "Content-Length": str(len(pdf_bytes)),
+      "X-Goog-Upload-Offset": "0",
+      "X-Goog-Upload-Command": "upload, finalize",
+  }
+  req2 = urllib.request.Request(
+      upload_url, data=pdf_bytes, headers=upload_headers, method="POST"
+  )
+  with urllib.request.urlopen(req2, timeout=20) as resp2:
+    info = json.loads(resp2.read().decode("utf-8"))
+
+  file_obj = info.get("file") if isinstance(info, dict) and "file" in info else info
+  file_uri = file_obj.get("uri") if isinstance(file_obj, dict) else None
+  file_name = file_obj.get("name") if isinstance(file_obj, dict) else None
+  state = file_obj.get("state") if isinstance(file_obj, dict) else None
+
+  # انتظار قصير إذا كانت حالة الملف PROCESSING
+  if file_name and state == "PROCESSING":
+    for _ in range(4):
+      time.sleep(1)
+      chk_url = f"https://generativelanguage.googleapis.com/v1beta/{file_name}?key={GEMINI_API_KEY}"
+      with urllib.request.urlopen(chk_url, timeout=8) as chk_resp:
+        chk_data = json.loads(chk_resp.read().decode("utf-8"))
+        state = chk_data.get("state")
+        file_uri = chk_data.get("uri") or file_uri
+        if state == "ACTIVE":
+          break
+
+  if file_uri:
+    return {"mimeType": "application/pdf", "fileUri": file_uri}
+  return None
+
+
+def load_gemini_pdf_files():
+  now = time.time()
+  if _cache["pdf_files"] and (now - _cache["pdf_fetched_at"]) < PDF_CACHE_TTL:
+    return _cache["pdf_files"]
+
+  uploaded = []
+  for idx, url in enumerate(PDF_URLS, start=1):
+    try:
+      req = urllib.request.Request(
+          url, headers={"User-Agent": "LdoravaBot/1.0"}
+      )
+      with urllib.request.urlopen(req, timeout=10) as resp:
+        pdf_bytes = resp.read()
+      file_part = upload_pdf_to_gemini(pdf_bytes, display_name=f"guide_{idx}.pdf")
+      if file_part:
+        uploaded.append(file_part)
+    except Exception:
+      continue
+
+  if uploaded:
+    _cache["pdf_files"] = uploaded
+    _cache["pdf_fetched_at"] = now
+
+  return _cache["pdf_files"]
 
 
 def search_store(query, entries, top_k=3):
@@ -211,12 +315,14 @@ class handler(BaseHTTPRequestHandler):
       return
 
     entries = load_store_data()
-    if not entries:
+    pdf_files = load_gemini_pdf_files()
+
+    if not entries and not pdf_files:
       self._send_json(
           200,
           {
               "reply": (
-                  "عذراً، تعذر قراءة بيانات المتجر من الرابط المحدد حالياً."
+                  "عذراً، تعذر قراءة بيانات المتجر أو ملفات الإرشادات حالياً."
               )
           },
       )
@@ -225,19 +331,23 @@ class handler(BaseHTTPRequestHandler):
     recent_text = " ".join(
         h.get("text", "") for h in history[-2:] if isinstance(h, dict)
     )
-    context = search_store(f"{recent_text} {msg}".strip(), entries, top_k=3)
+    context = (
+        search_store(f"{recent_text} {msg}".strip(), entries, top_k=3)
+        if entries
+        else "لا توجد بيانات منتجات متاحة حالياً."
+    )
 
     system_instruction = (
-        "أنت مساعد مبيعات سريع ودقيق لمتجر L'DORA Viva. أجب بإيجاز ووضوح"
-        " بالاعتماد على بيانات المتجر أدناه فقط.\n"
+        "أنت مساعد مبيعات واستشارات ودود وسريع لمتجر L'DORA Viva. أجب"
+        " بإيجاز ووضوح بالاعتماد على ملفات PDF المرفقة وبيانات المتجر"
+        " أدناه فقط.\n"
+        "- إذا سأل الزبون عن تعليمات أو نصائح (مثل معرفة نوع البشرة أو"
+        " الخطوات والإرشادات)، استخرج الإجابة مباشرة من ملفات PDF المرفقة"
+        " وقدّمها بوضوح.\n"
         "- اعتمد على بيانات المتجر كمرجع وحيد للأسعار (د.ع) والتوفر"
-        " والمواصفات وطريقة الاستخدام (usage) والأنواع (variants).\n"
-        "- إذا وُجد المنتج في البيانات (مثل غسول الجسم 300مل بسعر 10000"
-        " د.ع)، أجب مباشرة بتوفره وسعره أو طريقة استخدامه من حقل usage"
-        " ولا تقل أبداً إنه غير متوفر.\n"
-        "- لا تقلد أخطاء سابقة من سجل المحادثة ولا تخلط بين المنتجات.\n"
-        "- إذا كان المنتج غير موجود فعلاً في البيانات، قل ذلك باختصار"
-        " واقترح منتجاً قريباً موجوداً فعلاً.\n\n"
+        " وطريقة الاستخدام (usage) والأنواع (variants) ولا تخترع منتجات أو"
+        " أسعار غير موجودة.\n"
+        "- لا تقلد أخطاء سابقة من سجل المحادثة ولا تخلط بين المنتجات.\n\n"
         f"بيانات المتجر:\n{context}"
     )
 
@@ -252,7 +362,12 @@ class handler(BaseHTTPRequestHandler):
         if h.get("role") == "model" and "غير متوفر" in txt:
           continue
         contents.append({"role": h["role"], "parts": [{"text": txt[:220]}]})
-    contents.append({"role": "user", "parts": [{"text": msg}]})
+
+    user_parts = [{"text": msg}]
+    for pf in pdf_files:
+      user_parts.append({"fileData": pf})
+
+    contents.append({"role": "user", "parts": user_parts})
 
     res_json = None
     last_err = ""
@@ -262,7 +377,7 @@ class handler(BaseHTTPRequestHandler):
       req_body = json.dumps({
           "system_instruction": {"parts": [{"text": system_instruction}]},
           "contents": contents,
-          "generationConfig": {"temperature": 0.1, "maxOutputTokens": 180},
+          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 260},
       }).encode("utf-8")
 
       try:
@@ -272,7 +387,7 @@ class handler(BaseHTTPRequestHandler):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=11) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
           res_json = json.loads(resp.read().decode("utf-8"))
         break
       except urllib.error.HTTPError as e:
@@ -312,7 +427,7 @@ class handler(BaseHTTPRequestHandler):
         "ثبت",
         "موافق",
     )
-    if any(w in normalize_ar(msg) for w in confirm_words):
+    if entries and any(w in normalize_ar(msg) for w in confirm_words):
       add_to_cart_id = find_matching_product_id(
           f"{recent_text} {reply}", entries
       )
