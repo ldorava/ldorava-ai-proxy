@@ -39,7 +39,7 @@ def normalize_ar(text):
   text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
   text = re.sub(r"[أإآاٱ]", "ا", text)
   text = text.replace("ى", "ي").replace("ي", "ي").replace("ة", "ه")
-  text = re.sub(r"[^\w\s\u0600-\u06ff]", " ", text)
+  text = re.sub(r"[^\w\s\u0600-\u6ff]", " ", text)
   return re.sub(r"\s+", " ", text).strip()
 
 
@@ -94,7 +94,9 @@ def extract_entries(obj, prefix=""):
 def parse_guide_text(raw_text):
   if not raw_text:
     return []
-  blocks = [b.strip() for b in re.split(r"\n\s*\n+", raw_text.strip()) if b.strip()]
+  blocks = [
+      b.strip() for b in re.split(r"\n\s*\n+", raw_text.strip()) if b.strip()
+  ]
   guide_entries = []
   for idx, block in enumerate(blocks, start=1):
     first_line = block.splitlines()[0].strip()[:80]
@@ -166,7 +168,7 @@ def search_store(query, entries, top_k=4):
     score = 0
     for w in words:
       if re.search(rf"\b{re.escape(w)}\b", norm_title):
-        score += 8
+        score += 9
       elif w in norm_title:
         score += 5
       elif re.search(rf"\b{re.escape(w)}\b", norm_haystack):
@@ -187,6 +189,55 @@ def search_store(query, entries, top_k=4):
     if t:
       summary.append(f"- {t}")
   return "المنتجات والإرشادات المتوفرة:\n" + "\n".join(summary)
+
+
+def build_context(combined_q, entries):
+  norm_q = normalize_ar(combined_q)
+
+  # 1) أسئلة معرفة نوع البشرة أو أنواع البشرة
+  if any(
+      k in norm_q
+      for k in ("نوع بشرت", "انواع البشر", "اعرف بشرت", "تحديد البشر")
+  ):
+    parts = []
+    for topic in (
+        "تحديد البشرة الجافة",
+        "البشرة الدهنية",
+        "البشرة المختلطة",
+        "البشرة الحساسة",
+    ):
+      found = search_store(topic, entries, top_k=1)
+      if found and found not in parts:
+        parts.append(found)
+    if parts:
+      return "\n\n---\n\n".join(parts)
+
+  # 2) أسئلة معرفة نوع الشعر أو أنواع الشعر
+  if any(
+      k in norm_q for k in ("نوع شعر", "انواع الشعر", "اعرف شعر", "تحديد الشعر")
+  ):
+    parts = []
+    for topic in (
+        "الشعر الجاف",
+        "الشعر الدهني",
+        "الشعر المختلط",
+        "العناية بالشعر العادي",
+    ):
+      found = search_store(topic, entries, top_k=1)
+      if found and found not in parts:
+        parts.append(found)
+    if parts:
+      return "\n\n---\n\n".join(parts)
+
+  # 3) أسئلة الباقات العلاجية أو التفتيح أو الشعر
+  if any(
+      k in norm_q for k in ("باقه", "باقات", "مجموعه", "مجموعات", "بكج", "بكجات")
+  ):
+    base = search_store(combined_q, entries, top_k=3)
+    notes = search_store("ملاحظات هامة تحذيرات تخصيص الباقات", entries, top_k=1)
+    return f"{base}\n\n---\n\n{notes}" if notes else base
+
+  return search_store(combined_q, entries, top_k=4)
 
 
 def find_matching_product_id(text_pool, entries):
@@ -270,44 +321,24 @@ class handler(BaseHTTPRequestHandler):
         h.get("text", "") for h in history[-2:] if isinstance(h, dict)
     )
     combined_q = f"{recent_text} {msg}".strip()
-    norm_q = normalize_ar(combined_q)
-
-    if any(
-        k in norm_q
-        for k in ("نوع بشرت", "انواع البشر", "اعرف بشرت", "تحديد البشر")
-    ):
-      skin_parts = []
-      for topic in (
-          "تحديد البشرة الجافة",
-          "البشرة الدهنية",
-          "البشرة المختلطة",
-          "البشرة الحساسة",
-      ):
-        found = search_store(topic, entries, top_k=1)
-        if found and found not in skin_parts:
-          skin_parts.append(found)
-      context = (
-          "\n\n---\n\n".join(skin_parts)
-          if skin_parts
-          else search_store(combined_q, entries, top_k=4)
-      )
-    else:
-      context = search_store(combined_q, entries, top_k=4)
+    context = build_context(combined_q, entries)
 
     system_instruction = (
-        "أنت مساعد مبيعات واستشارات ودود وسريع لمتجر L'DORA Viva. أجب"
-        " بوضوح، ترتيب، وإيجاز بالاعتماد على بيانات المتجر ودليل العناية"
-        " أدناه فقط.\n"
-        "- إذا سأل الزبون عن كيفية معرفة نوع بشرته أو أنواع البشرة، اذكر"
-        " خطوات الفحص ثم وضّح علامات وطريقة تمييز الأنواع المتوفرة في"
-        " الدليل (الجافة، الدهنية، المختلطة، الحساسة) بشكل مرتب وواضح.\n"
-        "- عند الإجابة عن أسئلة البشرة، العناية، أو التعليمات: رتّب"
-        " الخطوات في نقاط مرقّمة أو واضحة ومباشرة (1، 2، 3...).\n"
-        "- بعد توضيح الخطوات أو الإرشادات، يمكنك ترشيح منتج مناسب من بيانات"
-        " المتجر إذا كان موجوداً فعلاً، مع ذكر سعره بعملة (د.ع) بدقة.\n"
-        "- اعتمد على بيانات المتجر كمرجع وحيد للأسعار (د.ع) والتوفر"
-        " وطريقة الاستخدام (usage) والأنواع (variants) ولا تخترع منتجات أو"
-        " أسعار غير موجودة.\n"
+        "أنت مساعد مبيعات واستشارات ودود، دقيق، وسريع لمتجر L'DORA Viva. ادخل"
+        " في صلب الإجابة مباشرة دون مقدمات طويلة متكررة، بالاعتماد على"
+        " البيانات والإرشادات أدناه فقط.\n"
+        "- عند السؤال عن معرفة نوع البشرة أو أنواعها: اذكر خطوات الفحص"
+        " بترقيم واضح ثم وضّح علامات وطريقة تمييز الأنواع المتوفرة (الجافة،"
+        " الدهنية، المختلطة، الحساسة).\n"
+        "- عند السؤال عن معرفة نوع الشعر أو أنواع الشعر: اذكر خطوات الفحص"
+        " والعلامات والعناية لكل نوع متوفر في الدليل.\n"
+        "- عند السؤال عن الباقات أو العناية أو طريقة الاستخدام: رتّب"
+        " المكونات أو الخطوات بنقاط واضحة ومباشرة، واذكر الملاحظات أو"
+        " التحذيرات المهمة المرتبطة بها إن وجدت.\n"
+        "- إذا رشّحت منتجاً من بيانات المتجر، اذكر اسمه وسعره بدقة بعملة"
+        " (د.ع) ولا تخترع منتجات أو أسعار غير موجودة.\n"
+        "- اختم بسؤال قصير ومفيد واحد فقط لتضييق الخيار عند الحاجة (مثل نوع"
+        " البشرة أو المشكلة أو الميزانية).\n"
         "- لا تقلد أخطاء سابقة من سجل المحادثة ولا تخلط بين المنتجات.\n\n"
         f"البيانات والإرشادات:\n{context}"
     )
@@ -333,7 +364,7 @@ class handler(BaseHTTPRequestHandler):
       req_body = json.dumps({
           "system_instruction": {"parts": [{"text": system_instruction}]},
           "contents": contents,
-          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 340},
+          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 360},
       }).encode("utf-8")
 
       try:
