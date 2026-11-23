@@ -98,7 +98,9 @@ def parse_guide_text(raw_text):
   guide_entries = []
   for idx, block in enumerate(blocks, start=1):
     first_line = block.splitlines()[0].strip()[:80]
-    title = f"دليل العناية - {first_line}" if first_line else f"دليل العناية #{idx}"
+    title = (
+        f"دليل العناية - {first_line}" if first_line else f"دليل العناية #{idx}"
+    )
     guide_entries.append({
         "title": title,
         "content": block[:1400],
@@ -126,9 +128,13 @@ def load_all_data():
     if raw_store:
       store_json = json.loads(raw_store)
       products = (
-          store_json.get("products") if isinstance(store_json, dict) else store_json
+          store_json.get("products")
+          if isinstance(store_json, dict)
+          else store_json
       )
-      combined.extend(extract_entries(products if products is not None else store_json))
+      combined.extend(
+          extract_entries(products if products is not None else store_json)
+      )
   except Exception:
     pass
 
@@ -263,15 +269,40 @@ class handler(BaseHTTPRequestHandler):
     recent_text = " ".join(
         h.get("text", "") for h in history[-2:] if isinstance(h, dict)
     )
-    context = search_store(f"{recent_text} {msg}".strip(), entries, top_k=4)
+    combined_q = f"{recent_text} {msg}".strip()
+    norm_q = normalize_ar(combined_q)
+
+    if any(
+        k in norm_q
+        for k in ("نوع بشرت", "انواع البشر", "اعرف بشرت", "تحديد البشر")
+    ):
+      skin_parts = []
+      for topic in (
+          "تحديد البشرة الجافة",
+          "البشرة الدهنية",
+          "البشرة المختلطة",
+          "البشرة الحساسة",
+      ):
+        found = search_store(topic, entries, top_k=1)
+        if found and found not in skin_parts:
+          skin_parts.append(found)
+      context = (
+          "\n\n---\n\n".join(skin_parts)
+          if skin_parts
+          else search_store(combined_q, entries, top_k=4)
+      )
+    else:
+      context = search_store(combined_q, entries, top_k=4)
 
     system_instruction = (
         "أنت مساعد مبيعات واستشارات ودود وسريع لمتجر L'DORA Viva. أجب"
         " بوضوح، ترتيب، وإيجاز بالاعتماد على بيانات المتجر ودليل العناية"
         " أدناه فقط.\n"
-        "- عند الإجابة عن أسئلة البشرة، العناية، معرفة نوع البشرة، أو"
-        " التعليمات: رتّب الخطوات بشكل مرقّم أو نقاط واضحة ومباشرة (1، 2، 3...)"
-        " من دليل العناية المرفق.\n"
+        "- إذا سأل الزبون عن كيفية معرفة نوع بشرته أو أنواع البشرة، اذكر"
+        " خطوات الفحص ثم وضّح علامات وطريقة تمييز الأنواع المتوفرة في"
+        " الدليل (الجافة، الدهنية، المختلطة، الحساسة) بشكل مرتب وواضح.\n"
+        "- عند الإجابة عن أسئلة البشرة، العناية، أو التعليمات: رتّب"
+        " الخطوات في نقاط مرقّمة أو واضحة ومباشرة (1، 2، 3...).\n"
         "- بعد توضيح الخطوات أو الإرشادات، يمكنك ترشيح منتج مناسب من بيانات"
         " المتجر إذا كان موجوداً فعلاً، مع ذكر سعره بعملة (د.ع) بدقة.\n"
         "- اعتمد على بيانات المتجر كمرجع وحيد للأسعار (د.ع) والتوفر"
@@ -302,7 +333,7 @@ class handler(BaseHTTPRequestHandler):
       req_body = json.dumps({
           "system_instruction": {"parts": [{"text": system_instruction}]},
           "contents": contents,
-          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 320},
+          "generationConfig": {"temperature": 0.15, "maxOutputTokens": 340},
       }).encode("utf-8")
 
       try:
