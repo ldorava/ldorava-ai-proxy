@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -121,7 +122,9 @@ class handler(BaseHTTPRequestHandler):
 
   def do_POST(self):
     if not GEMINI_API_KEY:
-      self._send_json(500, {"reply": "إعدادات الخادم غير مكتملة."})
+      self._send_json(
+          500, {"reply": "مفتاح GEMINI_API_KEY غير موجود في إعدادات Vercel."}
+      )
       return
 
     try:
@@ -140,7 +143,14 @@ class handler(BaseHTTPRequestHandler):
 
     entries = load_store_data()
     if not entries:
-      self._send_json(200, {"reply": "عذراً، تعذر قراءة بيانات المتجر حالياً."})
+      self._send_json(
+          200,
+          {
+              "reply": (
+                  "عذراً، تعذر قراءة بيانات المتجر من الرابط المحدد حالياً."
+              )
+          },
+      )
       return
 
     recent_text = " ".join(
@@ -185,10 +195,12 @@ class handler(BaseHTTPRequestHandler):
       )
       with urllib.request.urlopen(req, timeout=20) as resp:
         res_json = json.loads(resp.read().decode("utf-8"))
-    except Exception:
-      self._send_json(
-          502, {"reply": "تعذر الاتصال بالمساعد حالياً، حاول بعد قليل."}
-      )
+    except urllib.error.HTTPError as e:
+      err_detail = e.read().decode("utf-8", errors="ignore")[:250]
+      self._send_json(502, {"reply": f"خطأ من Gemini ({e.code}): {err_detail}"})
+      return
+    except Exception as e:
+      self._send_json(502, {"reply": f"تعذر الاتصال بـ Gemini: {str(e)[:200]}"})
       return
 
     reply = (
